@@ -1,0 +1,958 @@
+---
+title: "Predictive Modeling and Interpretability Project"
+author: "Simone Punzo"
+format: html
+code-fold: true
+code-tools: true
+embed-resources: true
+page-layout: full
+toc: true
+toc-title: tasks
+toc-location: left
+toc-expand: 2
+theme: minty
+knitr:
+  opts_chunk: 
+    collapse: true
+    R.options:
+    message: false
+    warning: false
+    code-fold: false
+---
+
+
+```{r setup, include=FALSE}
+library(tidyverse)
+library(tidymodels)
+library(skimr)
+library(janitor)
+library(vip)
+library(DALEXtra)
+library(iml)
+library(pdp)
+library(lime)
+library(workflowsets)
+library(patchwork)
+library(RWeka) 
+library(corrr)
+library(corrplot)
+
+
+tidymodels_prefer()
+```
+
+
+# Project Goal
+
+You will build a complete supervised learning workflow using the tidymodels framework in R. Your objective is to develop and compare predictive models on a real-world dataset using linear methods, ensemble methods and support vector machines, while applying best practices in preprocessing, resampling, and interpretation.
+
+
+# Dataset
+
+Pick a public dataset from [openML](https://www.openml.org/search?type=data&status=active&sort=runs).  
+  
+  - The dataset should have a clear target variable for prediction and at least 1000 observations.
+  
+  
+We chose the spambase dataset from openML : - https://www.openml.org/search?type=data&status=active&id=44&sort=runs
+                                            - https://www.kaggle.com/datasets/yasserh/spamemailsdataset
+                                            
+Let's import it from the .arff file
+
+
+```{r}
+data_path <-"dataset_44_spambase.arff"
+raw_data <-read.arff(data_path) 
+
+str(raw_data)
+colnames(raw_data)
+
+```
+Tidy it up
+
+```{r}
+spam_data <- raw_data |> as_tibble() #Rimane la stessa struttura , i dati erano già tidy
+
+spam_data<-spam_data |> clean_names()
+
+spam_data <- spam_data |> mutate(class = factor(class))
+
+```
+
+
+Tutte feature numeriche tranne la classe target (spam 1 , no spam 0)
+```{r}
+glimpse(spam_data)
+```
+
+
+
+Abbiamo 4601 osservazioni su 58 predittori che descrivono il contentuto di una email e se questa è stata classificata come spam oppure no.
+Dalla documentazioni openML vediamo che:
+
+ - le feature del tipo word_freq_WORD sono numeri reali da 0 a 100 che descrivono la percentuale di words nella mail intera che matchano WORD.
+ 
+- le feature del tipo char_freq_CHAR sono simili alle word_freq ma questa volta guardano ai singoli caratteri.
+
+- la feature capital_run_lenght_average indica la lunghezza media di una sequenza ininterrota di lettere maiuscole ed è un numero reale positivo 
+
+- la feature capital_run_length_longest è l'intero che descrive la sequenza di lettere maiuscole più lunga.
+
+- la feature capital_run_length_total è il numero totale di lettera maiuscole nella mail.
+
+Poniamoci la seguente domanda , perchè sono state scelte queste feature? La risposta sarà nella letteratura probabilmente, e infatti queste sono le feature della prima generazione di spam-detection .. infatti ora possiamo usare i words embeddings e i transformers with self-attention come rappresentazione semantica delle parole di un testo e usare queste feature per classificare la mail con un metodo di deep learning. Le lettera maiuscole , i caratteri speciali e certe parole come "money" sono espressione di un pattern che in questa prima generazione è stato trovato rispetto le mail attraverso NLP.
+
+char_freq_%B - ';' 
+char_freq_%28 - '(' 
+char_freq_%5B - '['
+char_freq_%21 - '!'
+char_freq_%23 -'#'
+char_freq_%24 - '$'
+
+URL encoding di caratteri usati notevolmente nelle spam mails.
+
+
+# Tasks 
+
+## Data Exploration & Preprocessing (15 points)
+- Explore the dataset: use skimr, janitor, ggplot2 to summarize and visualize.
+
+Usando skim otteniamo tutte le summary statistics per feature , oltre ad un controllo sugli NA e direttamente una colonna hist che potrebbe essere usata per tirare fuori dei grafici magari utili. Si evince una completezza totale per ogni feature , possiamo considerare il nostro dataset completo.
+```{r}
+skim(spam_data)
+```
+
+
+
+
+
+E infatti anche qui ci viene confermato che è tutto okay.
+```{r}
+spam_data |>
+  summarise(across(everything(), ~ sum(is.na(.))))
+```
+Analizziamo le summary statistics per capire con che dati stiamo avendo a che fare.
+Ovviamente molte parole , che corrispondono alle nostre feature, possono NON essere presenti in una particolare mail ma magari quando ci sono invece la loro frequenza ha un valore discriminativo interessante. Quandi vediamo per esempio una feature dal summary con p75=0 significa che il 75% delle mail non ha quella parola o carattere. Stiamo dunque gestendo una sparse data matrix. Dobbiamo necessarimente tenere presente della sparsità delle nostre feature anche soprattutto considerando il loro numero elevato : in alte dimensioni tutti i dati appaiono già come sparsi figuriamoci poi se le feature stesse lo sono-> c'è rischio di overfitting anche per modelli molto rigidi.
+Il dataset ci riserva sorprese! Accettiamo la sfida
+
+Come porsi nei confronti di tale situazione? Sicuramente 
+a) applichiamo qualche trasformazione alle feature
+b) selezionamo delle feature 
+c) PCA
+d)una combinazione di a,b,c.
+
+Proviamo a visuallizare questo fenomeno su una sola feature , le uniche feature che invece sono più normali sono quelle che riguardano il numero di lettere maiuscole e quindi le escludiamo da questa sotto-analisi e per ora non abbiamo motivo per mettere in dubbio il loro potere discriminativo.
+
+```{r}
+max(spam_data$word_freq_money)
+```
+
+
+Picco a 0 , long tail verso il massimo
+```{r}
+spam_data |>
+  ggplot(aes(x = word_freq_money)) +
+  geom_density(colour = "limegreen",linewidth = 1,alpha=0.5)+
+  geom_histogram(aes(y=after_stat(density)),binwidth = 0.1,fill = "dodgerblue",color="black",alpha=0.4)+
+  theme_minimal()+
+  coord_cartesian(xlim=c(0,1))
+```
+
+
+```{r}
+
+spam_data |>
+  ggplot(aes(x = word_freq_internet)) +
+  geom_density(colour = "limegreen",linewidth = 1,alpha=0.5)+
+  geom_histogram(aes(y=after_stat(density)),binwidth = 0.1,fill = "dodgerblue",color="black",alpha=0.4)+
+  theme_minimal()+
+  coord_cartesian(xlim=c(0,1))
+```
+```{r}
+spam_data |>
+  ggplot(aes(x = char_freq_percent_21)) +
+  geom_density(colour = "limegreen",linewidth = 1,alpha=0.5)+
+  geom_histogram(aes(y=after_stat(density)),binwidth = 0.1,fill = "dodgerblue",color="black",alpha=0.4)+
+  theme_minimal()+
+  coord_cartesian(xlim=c(0,1))
+```
+```{r}
+spam_data |>
+  ggplot(aes(x = char_freq_percent_24)) +
+  geom_density(colour = "limegreen",linewidth = 1,alpha=0.5)+
+  geom_histogram(aes(y=after_stat(density)),binwidth = 0.1,fill = "dodgerblue",color="black",alpha=0.4)+
+  theme_minimal()+
+  coord_cartesian(xlim=c(0,1))
+```
+I caratteri rispetto alle parole hanno ovviamente un maggior numero di occorrenze rispetto allo 0, è più facile che una mail ma in generale un testo contenga uno specifico carattere piuttosto che una specifica parola.
+
+Guardiamo ad un violin plot che ci fa vedere sia la distribuzione come un boxplot ma anche la concetrazione dei valori
+
+```{r}
+spam_data |>
+  ggplot(aes(x = class, y = word_freq_address, fill = class)) +
+  geom_violin(trim = FALSE, scale = "width", alpha = 0.7) +
+  geom_boxplot(width = 0.1, outlier.shape = NA, color = "black") +
+  scale_fill_manual(values = c("0" = "dodgerblue1", "1" = "firebrick")) +
+  theme_minimal()+
+  coord_cartesian(ylim=c(-0.2,2))
+```
+Conclusione: molte delle parole potrebbero non essere presenti in molte email ma quando queste ci sono il loro effetto dipende dalla parola in sè. In questo violin plot della parola address intanto vediamo che per entrambi le classi la feature è sparsa : abbiamo tanti valori vicini allo zero (la width del violino) . Address sembra essere una parola più presente nella mail NO-SPAM rispetto alla mail SPAM suggerendo che la sua presenza/assenza non ha un grande valore discriminativo.
+
+Guardiamo ad un'altra feature che invece ci evidenzi il caso opposto,tipo money
+
+```{r}
+spam_data |>
+  ggplot(aes(x = class, y = word_freq_money, fill = class)) +
+  geom_violin(trim = FALSE, scale = "width", alpha = 0.7) +
+  geom_boxplot(width = 0.1, outlier.shape = NA, color = "black") +
+  scale_fill_manual(values = c("0" = "dodgerblue1", "1" = "firebrick")) +
+  theme_minimal()+
+  coord_cartesian(ylim=c(-0.2,1.5))
+```
+Anche qui notiamo la sparsity per entrambe le classi , per la classe 0 però il violino è largo e schiacciato indicando che nel più delle mail legittime la parola money non viene quasi mai usata mentre il violino della classe spam hai dei peak (oltre a quello a 0) che sono rilevanti.
+
+
+(1) Queste conclusioni di "valore discriminativo" di feature singola non sono molto smart: nel guardare la differenza di distribuzione tra classi per una singola feature potresti sì evidenziare una qualche feature discriminante ma non puoi sapere se questa dipende dalla presenza di altre feature(parole o caratteri) ma è semplicemente una distribuzione per così dire a posteriori.
+
+
+
+Nel contesto di un dataset dove la target è categorica a due classi scegliamo di costruire le seguenti visualizzazioni:
+
+1)Proportion plot della classe target
+Dove notiamo un piacevole 60/40 che già ci fa tirare un sospiro di sollievo : il dataset è abbastanza bilanciato , o comunque abbastanza da permettere di EVITARE l'utilizzo anche di metodi naive come undersampling/oversampling e SMOTE per gestirlo o l'applicazione di una procedura di finetuning dei parametri dei modelli troppo spinta.
+Non sembra il caso gestire esplicitamente lo sbilanciamento se non facendo attenzione alla metrica da usare e guardando alla class-sensitivity del modello che otteniamo
+
+```{r}
+spam_data |>
+  count(class) |>
+  mutate(proportion = n / sum(n) * 100) |>
+  ggplot(aes(x = factor(class), y = proportion, fill = factor(class))) +
+  geom_col(width = 0.5) +
+  geom_text(aes(label = paste0(round(proportion, 1), "%")), vjust = -0.5, size = 5) +
+  scale_fill_manual(values = c("0" = "dodgerblue", "1" = "firebrick")) +
+  theme_minimal() +
+  labs(title = "Percentuale target variable",x="Spam 1 , Ham 0") +
+  ylim(0,80)
+```
+
+2)Un grafico per alcune feature che ci sembrano interessanti , stratificato per classe: word_freq_you , word_freq_money, word_freq_free perchè personalmente mi sembrano 3 parole che una mail di spam userebbe. Poi guardiamo ai char_freq_%21 e %24 cioè '!' e '$' che pure secondo la letteratura sono due caratteri indiziati e il capital_run_lenght_total.
+```{r}
+#Facciamo ylim perchè il più dei valori visto che parliamo di frequenza di una parola e/o un carattere sono bassi
+#quindi per aiutarci a trovare visivamente differenza tra popolazioni per classi mettiamo meno in evidenza gli outliers e i whishers
+you_plot<- spam_data |> 
+  ggplot(aes(x=class,y=word_freq_you,fill=class))+
+  geom_boxplot(outlier.shape = 21,alpha=0.7)+
+  scale_fill_manual(values=c("dodgerblue1","firebrick"))+theme_minimal()+
+coord_cartesian(ylim = c(0, 10))
+
+money_plot<- spam_data |> 
+  ggplot(aes(x=class,y=word_freq_money,fill=class))+
+  geom_boxplot(outlier.shape = 21,alpha=0.7)+
+  scale_fill_manual(values=c("dodgerblue1","firebrick"))+theme_minimal()+
+  coord_cartesian(ylim = c(0, 0.2))
+
+
+free_plot<- spam_data |> 
+  ggplot(aes(x=class,y=word_freq_free,fill=class))+
+  geom_boxplot(outlier.shape = 21,alpha=0.7)+
+  scale_fill_manual(values=c("dodgerblue1","firebrick"))+theme_minimal()+
+  coord_cartesian(ylim = c(0, 1.2))
+
+
+esclamation_plot <- spam_data |> 
+  ggplot(aes(x=class,y=char_freq_percent_21,fill=class))+
+  geom_boxplot(outlier.shape = 21,alpha=0.7)+ scale_fill_manual(values=c("dodgerblue1","firebrick"))+ theme_minimal()+
+  coord_cartesian(ylim = c(0,1.2))
+
+
+dollar_plot <-spam_data |> 
+  ggplot(aes(x=class,y=char_freq_percent_24,fill=class))+
+  geom_boxplot(outlier.shape = 21,alpha=0.7)+ scale_fill_manual(values=c("dodgerblue1","firebrick"))+ theme_minimal()+
+  coord_cartesian(ylim = c(0, 1.2))
+
+
+capital_plot <-spam_data |> 
+   ggplot(aes(x=class,y=capital_run_length_total,fill=class))+
+  geom_boxplot(outlier.shape = 21,alpha=0.7)+ scale_fill_manual(values=c("dodgerblue1","firebrick"))+ theme_minimal()+
+  coord_cartesian(ylim = c(0, 750))
+
+
+ 
+```
+
+```{r}
+eda_boxplot <- (you_plot | money_plot ) / 
+              ( free_plot | esclamation_plot) / ( dollar_plot | capital_plot)
+
+eda_boxplot
+```
+Ricordiamo che per capire un boxplot visivamente -> guardi alle mediane e alla sovrapposizione dell'IQR per capire se c'è un effetto discriminante tra popolazioni.
+Cataloghiamo così:
+A)Strong ->money,free e il punto esclamativo
+B)Moderate -> il dollaro come carattere
+C)Weak -> word_freq_you ha un overlap considerevole ma mediane diverse
+Z)Strongest-> capital_run_lenght_total soprattuto per lo spread di una classe rispetto all'altro guardando alla scala.
+
+Abbiamo mica deciso che feature usare? Certo che no , potrebbero assolutamente essercene molte altre interessanti, anche perchè per ora non stiamo guardando alla correlazione (p.e. il numero di you e your potrebbe essere correlato)
+E comunque nel guardare i singoli boxplot vale la stessa considerazione di sopra! (1)
+
+
+3)correlation matrix
+Mostriamo solo le correlazioni più significative (tra -1 e -0.7 e 0.7 ed 1)
+```{r}
+
+cor_matrix<-cor(spam_data |> select(-class))
+```
+
+
+```{r}
+strong_correlations <- cor_matrix |> 
+  as_tibble(rownames = "var1") |> 
+  pivot_longer(-var1, names_to = "var2", values_to = "correlation") |> 
+  filter(var1 != var2, abs(correlation) > 0.80) |> 
+  select(var1, var2, correlation) |> 
+  arrange(desc(abs(correlation)))
+```
+
+```{r}
+strong_correlations
+```
+
+Guardano all feature a maggiore correlazione e alla VIP della LASSO regolarizzata, droppiamo word_freq_415, 857 e george
+
+```{r}
+corrplot(cor_matrix, method = "color", type = "upper", tl.cex = 0.5)
+```
+Notiamo che dal punto di vista della correlazione , a parte qualche coppia fortemente correlata positivamente la situazione è gestibile. OFC ci sono correlazioni negative frutto della casualità ma nulla di più : siamo in uno spazio sparso , praticamente non-negativo in nessuna feature. Cioè se p.e. una parola ha un valore alto word_freq_1 , un'altra feature word_freq_2 per avere una correlazione negativa dovrebbe consistentemente avere valori più bassi tanto più alti i valori di word_freq_1. Questa consistenza di comportamento non può mai esistere in un dataset così sparso.
+
+Proviamo a fare matrice di correlazione ma clustered , un modo per vedere i 'gruppi' correlati. Come vediamo il fenomeno è limitato a poche particolari feature. Questa correlazione può comunque essere un problema , data la grande sparsità del dataset togliamo rimuoverla.
+
+```{r}
+corrplot(cor_matrix, method = "color", type = "upper",
+         order = "hclust", addrect = 5, tl.cex = 0.5)
+```
+
+(2) Valutazioni finali sul dataset per definire il preprocessing :
+
+  - Alta dimensionalità : rischio di overfitting anche per modelli rigidi -> occhio al data leakage e spingiamo sulla      valutazione su test-set
+  
+  - Sparsità : anche qui rischio di overfitting -> alta varianza perchè anche a seconda del training_split , le             osservazioni 'anomale' (quelle non zero , ma con valori dominanti) dominano la legge risultante del modello. Cambi     split potresti avere un modello decisamente diverso, anche qui il testing è la prova del 9.
+  
+  - Correlazione forte per alcune variabili : distorsione dell'inferenza -> i segnali tra variabili correlate non          vengono distinti.
+  
+  - Non abbiamo a che fare con compositional data : visto che ogni mail ha un vocabolario diverso e il numero totale di     parole/caratteri che rappresenta il denominatore con cui si tirano fuori le frequenze relative è diverso da istanza     a istanza , le nostre righe non rappresentano dei "frequency profiles" perchè la somma non fa 100 , insomma. Anche     se è comunque vero che lo spazio delle feature è non Euclideo e infatti le nostre correlazioni sono "spurie" :         frutto del fatto che se aumenta la frequenza di una parola necessariamente deve diminuire la frequenza di altre,       lasciando invariato il numero totale delle stesse.
+  
+
+Conclusioni -> Il nostro dataset ha molte variabili, spesso sparse e correlate, che descrivono blocchi concettualmente diversi: frequenze di parole, frequenze di caratteri e statistiche sui caratteri maiuscoli. Anche se le variabili sono frequenze, non costituiscono dati composizionali veri e propri: ogni email ha una lunghezza diversa e un vocabolario proprio, quindi le somme delle frequenze non sono costanti. Il preprocessing necessario è quello che segue :
+  - rimozione variabili fortemente correlate (almeno una per coppia correlata)
+  - rimozione variabili business specific
+  - normalizziamo i predittori numerici 
+  - rimuoviamo quelli a zero varianza( verosimilmente nessuno)
+
+  
+We are all set! Adesso arriviamo al sugo della storia.
+
+Facciamo un learning flow naive senza preprocessing e solo normalizzazione per definire una baseline
+
+
+```{r}
+spam_data_clean <- spam_data |> 
+  select(-word_freq_george, -word_freq_415, -word_freq_857)
+```
+
+```{r}
+
+base_recipe <- recipe(class ~ ., data=spam_data_clean) |> step_zv(all_predictors()) |> step_normalize(all_predictors()) 
+
+```
+  
+```{r}
+set.seed(123)
+
+data_split <- initial_split(spam_data_clean, prop = 3/4, strata = class)
+spam_train <- training(data_split)
+spam_test <- testing(data_split)
+
+folds <-vfold_cv(data=spam_train,strata=class,v=5)
+
+#definiamo le metriche da usare, usiamo le stesse sul sito dell'UCI per avere un paragone diretto
+spam_metrics <- metric_set(yardstick::accuracy, precision)
+
+vaidation_metrics <- metric_set(roc_auc)
+
+```
+  
+
+```{r}
+
+
+#Definiamo i modelli
+lasso_model_base <- logistic_reg(
+  mode = "classification",
+  penalty = tune(),
+  mixture = 1 #Vogliamo provare direttamente ad usare la lasso per provare a fare una feature selection automatica
+) |> 
+  set_engine("glmnet")
+
+
+svm_model_base <-svm_linear(
+  mode="classification",
+  cost = tune() 
+) |> set_engine("kernlab")
+
+
+xgb_model_base <- boost_tree(
+  mode = "classification",
+  trees = tune(),
+  tree_depth = tune(),
+  learn_rate = tune(),
+  loss_reduction = tune(),
+  sample_size = tune()
+) |> 
+  set_engine("xgboost")
+  
+model_list_base <- list(
+  lasso = lasso_model_base,
+  xgb = xgb_model_base,
+  svm=svm_model_base
+)
+
+recipe_list_base <- list(
+  base = base_recipe
+)
+
+workflows_base <- workflow_set(
+  preproc = recipe_list_base,
+  models = model_list_base
+)
+
+```
+
+
+```{r}
+#Definiamo le griglie
+
+grid_lasso <- grid_regular(
+  penalty(range = c(-4, 0)),
+  levels = 10
+)
+
+
+grid_svm <- grid_regular(
+  cost(range = c(-4, 3)),
+  levels = 10
+)
+
+# Questa griglia è diversa perchè abbiamo uno spazio di parametri molto più esteso, fare grid_regular sarebbe 
+#5^5 modelli! 
+grid_xgb <- grid_space_filling(
+  trees(range = c(100, 1000)),
+  tree_depth(range = c(1, 10)),
+  learn_rate(range = c(-3, -0.5)),  
+  loss_reduction(range = c(-1, 1)),
+  sample_size = sample_prop(range = c(0.5, 1)),
+  size = 10,
+  type="max_entropy"
+)
+```
+
+Mettiamo le griglie nelle option di ogni worfklow id group
+```{r}
+#Estrazione degli id 
+lasso_ids <- workflows_base |>
+  filter(str_detect(wflow_id, "lasso"))  |> 
+  pull(wflow_id)
+
+svm_ids <- workflows_base |>
+  filter(str_detect(wflow_id, "svm")) |> 
+  pull(wflow_id)
+
+xgb_ids <- workflows_base |>
+  filter(str_detect(wflow_id, "xgb"))  |> 
+  pull(wflow_id)
+
+#aggiunga della griglia al relativo modelll
+
+workflows_base <- lasso_ids |> 
+  reduce(
+    ~ option_add(.x, id = .y, grid = grid_lasso),
+    .init = workflows_base
+  )
+
+
+workflows_base <- xgb_ids |> 
+  reduce(
+    ~ option_add(.x, id = .y, grid = grid_xgb),
+    .init = workflows_base
+  )
+
+workflows_base <- svm_ids |> 
+  reduce(
+    ~ option_add(.x, id = .y, grid = grid_svm),
+    .init = workflows_base
+  )
+
+
+```
+
+
+
+```{r}
+set.seed(123)
+
+tuned_results <- workflows_base  |> 
+  workflow_map(
+    resamples = folds,
+    metrics = vaidation_metrics,
+    control = control_grid(
+      save_pred = TRUE,
+      save_workflow = TRUE
+    ),
+    verbose = TRUE
+  )
+```
+
+
+
+```{r}
+autoplot(tuned_results)
+```
+```{r}
+all_metrics <- tuned_results  |> 
+  collect_metrics()
+
+```
+
+Selezionamo il best in base ad una metrica stabile e robusta ROC-AUC , poi per confrontare con i risultati della UCI useremo precision e accuracy su test_set
+
+
+```{r}
+all_metrics  |> 
+  filter(.metric == "roc_auc" )  |> 
+  arrange(desc(mean))  |> 
+  group_by(wflow_id) |> 
+  slice_max(mean,n=1) |> 
+  select(wflow_id, mean, std_err,.metric)
+```
+
+Sui dati di train sembra tutto fin troppo bello per essere vero
+Time to finalize
+Prima estraimo le best config per wflow_id e per metrica e guardiamole
+
+
+```{r}
+best_lasso <- tuned_results |>
+  extract_workflow_set_result("base_lasso") |>
+  select_best(metric = "roc_auc")
+
+best_svm <- tuned_results |>
+  extract_workflow_set_result("base_svm") |>
+  select_best(metric = "roc_auc")
+
+
+best_xgb <- tuned_results |>
+  extract_workflow_set_result("base_xgb") |>
+  select_best(metric = "roc_auc")
+```
+
+```{r}
+bind_rows(
+  best_lasso |> mutate(model = "lasso"),
+  best_svm   |> mutate(model = "svm"),
+  best_xgb   |> mutate(model = "xgb")
+) |> 
+  relocate(model, .before = everything())
+```
+
+
+
+```{r}
+
+final_lasso <- finalize_workflow(
+  extract_workflow(workflows_base, id = "base_lasso"),
+  best_lasso
+)
+
+final_svm <- finalize_workflow(
+  extract_workflow(workflows_base, id = "base_svm"),
+  best_svm
+)
+
+
+final_xgb <- finalize_workflow(
+  extract_workflow(workflows_base, id = "base_xgb"),
+  best_xgb
+)
+```
+
+```{r}
+final_lasso
+```
+```{r}
+final_svm
+```
+```{r}
+final_xgb
+```
+
+
+```{r}
+fit_lasso <- last_fit(final_lasso, split = data_split,metrics=spam_metrics)
+fit_svm  <- last_fit(final_svm,split = data_split,metrics=spam_metrics)
+fit_xgb   <- last_fit(final_xgb,split = data_split,metrics=spam_metrics)
+
+
+```
+
+Applichiamo last_fit ad ognuno dei workflow finalizzati
+```{r}
+metrics_lasso <- collect_metrics(fit_lasso) |>
+  filter(.metric == "accuracy" | .metric=="precision")
+
+metric_svm <- collect_metrics(fit_svm) |>
+  filter(.metric == "accuracy" | .metric=="precision")
+
+metric_xgb <- collect_metrics(fit_xgb) |>
+  filter(.metric == "accuracy" | .metric=="precision")
+
+```
+
+```{r}
+bind_rows(
+  metrics_lasso |>  mutate(model = "lasso"),
+  metric_xgb   |>  mutate(model = "xgb"),
+  metric_svm |> mutate(model="svm")
+) |> 
+  select(model, .estimate,.metric) |> 
+  arrange(desc(.estimate))
+```
+
+
+Impossibile che il nostro svm funzioni così bene sul test-set , forse il sito UCI fa riferimento ad un hard classifier? oppure data leakage? Non noto data leakage però
+
+Valutiamo un pò per esserne certi : 
+
+```{r}
+svm_preds_linear <- collect_predictions(fit_svm)
+
+
+linear_preds <- svm_preds_linear |> 
+  conf_mat(truth = class, estimate = .pred_class) |> autoplot(type="heatmap")
+
+linear_preds
+```
+
+
+
+
+```{r}
+vip_lasso <- fit_lasso |> extract_fit_parsnip() |> vip(num_features = 15, geom = "col") + ggtitle("Lasso")
+vip_xgb   <- fit_xgb   |> extract_fit_parsnip() |> vip(num_features = 15, geom = "col") + ggtitle("XGBoost")
+
+
+vip_lasso / vip_xgb
+```
+
+
+
+
+```{r}
+prep_recipe <- prep(base_recipe)
+baked_train <- bake(prep_recipe, new_data = spam_train)
+baked_test  <- bake(prep_recipe, new_data = spam_test)
+```
+
+```{r}
+set.seed(123)
+
+model_lasso <-extract_fit_parsnip(fit_lasso)
+
+predictor_lasso <- Predictor$new(
+  model=model_lasso,
+  data = baked_train |> select(-class),
+  y=baked_train$class,
+  type="prob",
+  class=".pred_1"
+)
+
+pdp_cs <- FeatureEffect$new(
+  predictor=predictor_lasso,
+  feature="word_freq_cs",
+  method="pdp"
+)
+
+lasso_cs_plot <-pdp_cs$plot() + ggtitle("PDP - Word CS (Lasso)")+theme_minimal() +
+  geom_line(color = "darkorchid1", linewidth = 1.2)
+
+```
+
+
+
+
+```{r}
+pdp_hp <- FeatureEffect$new(
+  predictor=predictor_lasso,
+  feature="word_freq_hp",
+  method="pdp"
+)
+
+lasso_hp_plot<-pdp_hp$plot() + ggtitle("PDP - Word HP (Lasso)")+theme_minimal() +
+  geom_line(color = "firebrick1", linewidth = 1.2)
+```
+
+```{r}
+lasso_cs_plot | lasso_hp_plot
+```
+
+
+
+
+```{r}
+set.seed(123)
+
+model_xgb <- extract_fit_parsnip(fit_xgb)
+
+predictor_xgb <- Predictor$new(
+  model = model_xgb,
+  data = baked_train |>  select(-class),
+  y = baked_train$class,
+  type = "prob",
+  class = ".pred_1"
+)
+
+pdp_dollar <- FeatureEffect$new(
+  predictor = predictor_xgb,
+  feature = "char_freq_percent_21",
+  method = "pdp"
+)
+
+xgb_dollar_plot <-pdp_dollar$plot() + ggtitle("PDP –  Carattere $ (XGBoost)")  +theme_minimal() +
+  geom_line(color = "blueviolet", linewidth = 1.2)
+```
+
+
+```{r}
+pdp_esclamation <- FeatureEffect$new(
+  predictor = predictor_xgb,
+  feature = "char_freq_percent_24",
+  method = "pdp"
+)
+
+xgb_exclamation_plot <- pdp_esclamation$plot() + ggtitle("PDP –  Carattere ! (XGBoost)") +theme_minimal() +
+  geom_line(color = "darkolivegreen1", linewidth = 1.2)
+```
+
+```{r}
+xgb_dollar_plot | xgb_exclamation_plot
+```
+
+
+```{r}
+
+pdp_lasso_exclamation <- FeatureEffect$new(
+  predictor=predictor_lasso,
+  feature="char_freq_percent_24",
+  method="pdp"
+)
+
+lasso_exclamation_plot <-pdp_lasso_exclamation$plot() + ggtitle("PDP - Char ! (Lasso)") +theme_minimal() +
+  geom_line(color = "aquamarine1", linewidth = 1.2)
+
+
+```
+
+```{r}
+xgb_exclamation_plot | lasso_exclamation_plot
+```
+
+
+
+```{r}
+
+set.seed(123)
+
+model_svm <-extract_fit_parsnip(fit_svm)
+
+predictor_svm <- Predictor$new(
+  model = model_svm,
+  data = baked_train |>  select(-class),
+  y = baked_train$class,
+  type = "prob",
+  class = ".pred_1"
+)
+
+feat_imp <- FeatureImp$new(predictor_svm, loss = "ce",n.repetitions = 30) 
+
+```
+
+```{r}
+plot(feat_imp) + labs(title="Feature importance SVM") + theme_minimal() +
+  theme(
+    axis.text.y = element_text(size = 6)
+  )
+```
+
+```{r}
+
+pdp_svm_hp <- FeatureEffect$new(
+  predictor=predictor_svm,
+  feature="word_freq_hp",
+  method="pdp"
+)
+
+pdp_svm_plot1<-pdp_svm_hp$plot() + ggtitle("PDP - Word HP (SVM)") +theme_minimal() +
+  geom_line(color = "cyan2", linewidth = 1.2)
+```
+
+
+```{r}
+pdp_svm_money <- FeatureEffect$new(
+  predictor=predictor_svm,
+  feature="word_freq_money",
+  method="pdp"
+)
+
+pdp_svm_plot2 <-pdp_svm_money$plot() + ggtitle("PDP - Word freq money (SVM)") +theme_minimal() +
+  geom_line(color = "chartreuse", linewidth = 1.2)
+```
+
+
+```{r}
+pdp_svm_plot1 | pdp_svm_plot2
+```
+
+Local explanations on one ham and one spam!
+
+```{r}
+set.seed(123)
+
+ham_instance <- baked_test  |>  filter(class == "0")  |>  slice_sample(n = 1)
+spam_instance <- baked_test  |>  filter(class == "1")  |>  slice_sample(n = 1)
+
+prediction_fun <- function(model, newdata) {
+  predict(model, newdata, type = "prob")[, ".pred_1", drop = TRUE]
+}
+
+predictor <- Predictor$new(
+  model = model_xgb,
+  data = baked_train  |>  select(-class),
+  y = baked_train$class,
+  predict.fun = prediction_fun,
+  class = "1"
+)
+
+shap_ham_xgb <- Shapley$new(
+  predictor,
+  x.interest = ham_instance |> select(-class)
+)
+
+plot(shap_ham_xgb) + labs(title="Shapley values XGB",
+  subtitle=paste0("Chance of being SPAM for a HAM Test instance",prediction_fun(model_xgb, ham_instance))) + 
+  ggplot2::theme(axis.text.y = ggplot2::element_text(size = 6))
+
+```
+
+```{r}
+shap_spam <- Shapley$new(
+  predictor,
+  x.interest = spam_instance |> select(-class)
+)
+
+plot(shap_spam) + labs(title="Shapley values XGB",
+  subtitle=paste0("Chance of being SPAM for a SPAM Test instance ",prediction_fun(model_xgb, spam_instance))) + 
+  ggplot2::theme(axis.text.y = ggplot2::element_text(size = 6))
+```
+
+
+
+```{r}
+shapley_svm_ham <- Shapley$new(predictor_svm, x.interest = ham_instance |> select(-class))
+
+plot(shapley_svm_ham) + labs(title="Shapley values - SVM",
+  subtitle=paste0("Chance of being SPAM for a HAM Test instance ",prediction_fun(model_svm, ham_instance))) + 
+  ggplot2::theme(axis.text.y = ggplot2::element_text(size = 6))
+```
+
+```{r}
+shapley_svm_spam <- Shapley$new(predictor_svm, x.interest = spam_instance |> select(-class))
+plot(shapley_svm_ham) + labs(title="Shapley values - SVM",
+  subtitle=paste0("Chance of being SPAM for a SPAM Test instance  ",prediction_fun(model_svm, spam_instance))) + 
+  ggplot2::theme(axis.text.y = ggplot2::element_text(size = 6))
+```
+
+
+```{r}
+shap_spam_lasso <- Shapley$new(
+  predictor_lasso,
+  x.interest = spam_instance |> select(-class)
+)
+
+plot(shap_spam_lasso) + labs(title="Shapley values Lasso",
+  subtitle=paste0("Chance of being SPAM for a SPAM Test instance ",prediction_fun(model_lasso, spam_instance))) + 
+  ggplot2::theme(axis.text.y = ggplot2::element_text(size = 6))
+```
+
+
+
+```{r}
+shap_ham_lasso <- Shapley$new(
+  predictor_lasso,
+  x.interest = ham_instance |> select(-class)
+)
+
+plot(shap_ham_lasso) + labs(title="Shapley values Lasso",
+  subtitle=paste0("Chance of being SPAM for a HAM Test instance ",prediction_fun(model_lasso, ham_instance))) + 
+  ggplot2::theme(axis.text.y = ggplot2::element_text(size = 6))
+```
+
+- Perform preprocessing using `recipes`:
+- Handle missing values (if any)
+- Encode categorical variables
+- Normalize or standardize numeric variables
+- (Optional) Apply feature selection or PCA
+
+## Model Development (25 points)
+
+ Build at least three models:
+	
+- One linear model with regularization
+
+- One SVM model (`kernlab::ksvm` via `parsnip`)
+
+- One ensemble method:
+
+  - Random Forest (`ranger`)
+
+  - XGBoost (`xgboost`)
+
+  - LightGBM (`lightgbm` via bonsai)
+
+Set up with `workflow()` and use proper tuning with tune_grid() or tune_bayes().
+
+## Resampling and Evaluation (25 points)
+
+- Use cross-validation (`vfold_cv`) with appropriate metrics (e.g., ROC AUC, accuracy, precision-recall).
+- Compare models using `collect_metrics()` and `autoplot()` from `tune` or `yardstick`.
+
+## Final Model and Variable Importance (10 points)
+
+- Finalize the best model using `last_fit()` or `fit()` on the full training set.
+
+- Use `vip` to extract global variable importance.
+
+## Model Explanation (25 points)
+
+Include both:
+
+Global Explanations
+
+- Feature importance (e.g., `vip()`, `permute()`, `SHAP`)
+
+- Partial dependence plots (e.g., `pdp::partial()`)
+  
+Local Explanations
+
+- Explain individual predictions using:
+- `lime` or `iml::Shapley`
+

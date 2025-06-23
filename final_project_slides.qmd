@@ -1,0 +1,462 @@
+---
+title: "Spam Detection Project"
+author: "Simone Punzo"
+title-slide-attributes:
+  data-background-color: "Mocassin"
+  data-background-image: figures/logo-unina.png
+  data-background-position: center
+  data-background-size: contain
+  data-background-opacity: "0.05"
+
+format:
+  revealjs:
+    theme: serif  
+    fontsize: 1.3em 
+    transition: fade  
+    slide-number: true
+    progress: true
+    logo: figures/logo-unina.png
+    embed-resources: true
+    code-fold: false
+    code-tools: true
+    preview-links: true
+    callout-icon: false
+    toc: true
+    toc-depth: 2
+    toc-title: "Outline"
+    toc-location: left
+
+
+knitr:
+  opts_chunk:
+    message: false
+    warning: false
+    echo: true
+    fig.align: center
+
+footer: "Simone Punzo – P37000026"
+---
+
+##  Project Objective {footer=false}
+
+::: {.incremental}
+-  Develop a **supervised learning pipeline** to detect spam emails.
+-  Predict if an email is **spam (`1`) or ham (`0`)**
+-  Implement multiple models **Lasso**, **SVM**, **XGBoost** using `tidymodels`.
+-  Focus both on **performance** and **interpretability** .
+:::
+
+
+##  Dataset Overview
+
+::: {.incremental}
+-  Dataset: **Spambase** -> Hopkins, M., Reeber, E., Forman, G., & Suermondt, J. (1999). Spambase [Dataset]. UCI Machine Learning Repository. https://doi.org/10.24432/C53G6X.
+- **4601** email observations, **58** predictors and 1 target
+- ️ Target variable: `class` (0 = ham, 1 = spam)
+-  All features are **continuous and numerical**
+- No missing values, easy work
+:::
+
+
+## Understanding the features
+
+::: {.panel-tabset}
+
+### ❓Who is George?
+
+- `word_freq_george`: refers to emails that mention **“George”** —  
+  according to the UCI documentation, this was likely **"George Forman"**, the name of the spam emails senders used in the study. Then this will probably almost always be a good predictor of spam 
+
+- `word_freq_857`: **“857”** was found often in a set of spam messages — likey a phone number of some employee.
+
+- `word_freq_415`: The **area code for San Francisco**
+
+> 🧠 These features are very very specific of the company email data selected — not semantically meaningful in a general sense, but a custom spam filter can surely also be based on such features. Since the aim is to generalize spam-detection , such specific features are dropped.
+
+---
+
+### 🔡 Char_freq_features
+
+| Feature              | Symbol |
+|----------------------|------------|
+| `char_freq_%21`      | `!`  |
+| `char_freq_%24`      | `$`  |
+| `char_freq_%23`      | `#`  |
+| `char_freq_%28`      | `(`  |
+| `char_freq_%5B`      | `[`  |
+| `char_freq_%3B`      | `;`  |
+
+- These are just the URL encoding of some common symbols.
+
+>  A high `char_freq_%24`? 💰💰💰💰💰💰💰 
+
+---
+
+### 🔠 Capital_run features
+
+- `capital_run_length_average`: average length of a run of **uppercase** characters
+- `capital_run_length_longest`: longest continuous **uppercase** sequence
+- `capital_run_length_total`: total number of uppercase letters in the email
+
+
+> 🗣️ CLICK HERE NOW FOR A FREE OFFER!!! DO NOT MISS THIS FREE TRIAL!!! DO NOT IGNORE THIS EMAIL!!!
+
+:::
+
+## Data Exploration 📊
+ Let's have a real look at the data
+
+::: {.panel-tabset}
+
+### 🎯 Class Distribution
+<div style="text-align: center;">
+<img src="plots/class_distribution.png" style="width:60%; height:auto;" />
+</div>
+
+- Binary target: **0 = ham**, **1 = spam**
+- Slight imbalance: ~60% ham, ~40% spam
+- Acceptable for most models without resampling
+
+
+
+### 📝 Word/Char Frequency Distributions
+<div style="text-align: center;">
+<img src="plots/kde.png" style="width:60%; height:auto;" />
+</div>
+
+- `word_freq_*` and `char_freq_*` are mostly sparse (bars very high at 0)
+- Right-skewed distributions, meaning the number of time a particular word is present is low compared to the total numberts of emails (the emails do not share a common vocabulary!)
+- Preprocessing of some sort is needed!
+
+### 🚨 Feature Correlations
+<div style="text-align: center;">
+  <img src="plots/corr_matrix.png" style="width:60%; height:auto;" />
+</div>
+
+- Most of the features correlation is not an issue
+- But there are a few of features highly coupled
+- word_freq_857 e word_freq_415 where removed because of the correlation with direct and the specificity of their meanings
+
+:::
+
+
+## Data Exploration Conclusions
+
+::: {.incremental}
+
+### 🏆 Challenges
+
+- **High dimensionality** 
+- **Sparsity** 
+- **Strong correlations** 
+- **Almost compositional data** ➡️ observed correlations may be *spurious* 
+
+---
+
+### 🤔 Preprocessing Decisions
+
+- Remove **highly correlated features**  
+- Drop **business-specific variables** (goodbye George!)  
+- Apply **normalization** to all numeric predictors (`step_normalize()`)  
+- Filter out **zero-variance predictors** (`step_zv()`) since it's a general good practice.
+- If the learning flow fails for some models we reiterate with a PCA or a MFA!
+
+:::
+
+## 🌊 Learning Flow
+
+- The full dataset was split in a **train/test**using `initial_split()`
+- The **training set** was then used for **5-fold cross-validation** during tuning
+- Extract for each the best configuration based on the validation metrics
+- Use the best configuration with `last_fit()`
+- The test set was **never touched** until final evaluation! Data leakage is our enemy
+
+
+
+### ➗ Data split and metrics definition!
+
+```{r eval=FALSE}
+data_split <- initial_split(spam_data_clean, prop = 3/4, strata = class)
+spam_train <- training(data_split)
+spam_test <- testing(data_split)
+
+folds <-vfold_cv(data=spam_train,strata=class,v=5)
+
+#definiamo le metriche da usare in testing
+spam_metrics <- metric_set(yardstick::accuracy, precision)
+
+vaidation_metrics <- metric_set(roc_auc)
+
+```
+
+
+## Lasso Learning Flow
+
+::: {.panel-tabset}
+
+### Model definition
+```{r eval=FALSE}
+lasso_model_base <- logistic_reg(
+  mode = "classification",
+  penalty = tune(),
+  mixture = 1 #Vogliamo provare direttamente ad usare la lasso per provare a fare una feature selection automatica
+) |> 
+  set_engine("glmnet")
+```
+
+
+### Tuning Grid
+```{r eval=FALSE}
+grid_lasso <- grid_regular(
+  penalty(range = c(-4, 0)),
+  levels = 10
+)
+```
+
+
+### Select best and finalize
+
+```{r eval=FALSE}
+
+best_lasso <- tuned_results |>
+  extract_workflow_set_result("base_lasso") |>
+  select_best(metric = "roc_auc")
+
+final_lasso <- finalize_workflow(
+  extract_workflow(workflows_base, id = "base_lasso"),
+  best_lasso
+)
+
+fit_lasso <- last_fit(final_lasso, split = data_split,metrics=spam_metrics)
+
+
+```
+
+
+### Resulting workflow
+
+<div style="text-align: center;">
+<img src="plots/final_lasso.png" style="width:60%; height:auto;" />
+</div>
+:::
+
+
+## SVM Learning Flow
+
+::: {.panel-tabset}
+
+### Model definition
+```{r eval=FALSE}
+svm_model_base <-svm_linear(
+  mode="classification",
+  cost = tune() 
+) |> set_engine("kernlab")
+```
+
+
+### Tuning Grid
+```{r eval=FALSE}
+grid_svm <- grid_regular(
+  cost(range = c(-4, 3)),
+  levels = 10
+)
+```
+
+
+### Select best and finalize
+
+```{r eval=FALSE}
+
+best_svm <- tuned_results |>
+  extract_workflow_set_result("base_svm") |>
+  select_best(metric = "roc_auc")
+
+final_svm <- finalize_workflow(
+  extract_workflow(workflows_base, id = "base_svm"),
+  best_svm
+)
+
+fit_svm  <- last_fit(final_svm,split = data_split,metrics=spam_metrics)
+
+```
+
+
+### Resulting workflow
+
+<div style="text-align: center;">
+<img src="plots/final_svm.png" style="width:60%; height:auto;" />
+</div>
+
+:::
+
+## XGB Learning Flow
+
+::: {.panel-tabset}
+
+### Model definition
+```{r eval=FALSE}
+xgb_model_base <- boost_tree(
+  mode = "classification",
+  trees = tune(),
+  tree_depth = tune(),
+  learn_rate = tune(),
+  loss_reduction = tune(),
+  sample_size = tune()
+) |> 
+  set_engine("xgboost")
+```
+
+
+### Tuning Grid
+```{r eval=FALSE}
+# Questa griglia è diversa perchè abbiamo uno spazio di parametri molto più esteso, fare grid_regular sarebbe 
+#5^5 modelli! 
+grid_xgb <- grid_space_filling(
+  trees(range = c(100, 1000)),
+  tree_depth(range = c(1, 10)),
+  learn_rate(range = c(-3, -0.5)),  
+  loss_reduction(range = c(-1, 1)),
+  sample_size = sample_prop(range = c(0.5, 1)),
+  size = 10,
+  type="max_entropy"
+)
+```
+
+### Select best and finalize
+
+```{r eval=FALSE}
+
+best_xgb <- tuned_results |>
+  extract_workflow_set_result("base_xgb") |>
+  select_best(metric = "roc_auc")
+
+final_xgb <- finalize_workflow(
+  extract_workflow(workflows_base, id = "base_xgb"),
+  best_xgb
+)
+
+fit_xgb   <- last_fit(final_xgb,split = data_split,metrics=spam_metrics)
+
+```
+
+
+### Resulting workflow
+
+<div style="text-align: center;">
+<img src="plots/final_xgb.png" style="width:60%; height:auto;" />
+</div>
+
+:::
+
+
+## Test metrics
+Here we showcase the precision and accuracy of our best models on our test data!
+<div style="text-align: center;">
+<img src="plots/test_metrics.png" style="width:70%; height:auto;" />
+</div>
+
+> Looking good 💣
+
+## Interpret our models - Global
+
+Prediction is good , now let's answer the question :
+
+> ❓What did our models actually learn from the data?❓
+
+Let's look at the feature importance per model and the pdp of some of the most important features
+
+
+::: {.panel-tabset}
+
+### Lasso
+
+<div style="display: flex; justify-content: center; gap: 1rem;">
+  <img src="plots/vip_lasso.png" style="width: 48%; height: auto;" />
+  <img src="plots/pdp_lasso.png" style="width: 48%; height: auto;" />
+</div>
+
+
+
+### SVM
+
+<div style="display: flex; justify-content: center; gap: 1rem;">
+  <img src="plots/vip_svm.png" style="width: 48%; height: auto;" />
+  <img src="plots/pdp_svm.png" style="width: 48%; height: auto;" />
+</div>
+
+
+
+### XGBoost
+
+<div style="display: flex; justify-content: center; gap: 1rem;">
+  <img src="plots/vip_xgb.png" style="width: 48%; height: auto;" />
+  <img src="plots/pdp_xgb.png" style="width: 48%; height: auto;" />
+</div>
+:::
+
+
+## Interpret our models - Local
+
+Let's now focus on two specific instances of our test_data.
+We select 1 ham and 1 spam email we ask ourselves:
+
+> ❓Why is our model predicting this result for this specific data instance?
+
+Let's look at the shapley values of each model on the two instances
+
+
+::: {.panel-tabset}
+
+### Lasso
+
+<div style="display: flex;gap: 1rem;">
+  <img src="plots/shapley_lasso_ham.png" style="width: 48%; height: auto;" />
+  <img src="plots/shapley_lasso_spam.png" style="width: 48%; height: auto;" />
+</div>
+
+### SVM
+
+<div style="display: flex; gap: 1rem;">
+  <img src="plots/shapley_svm_ham.png" style="width: 48%; height: auto;" />
+  <img src="plots/shapley_svm_spam.png" style="width: 48%; height: auto;" />
+</div>
+
+### XGB
+<div style="display: flex;gap: 1rem;">
+  <img src="plots/shapley_xgb.png" style="width: 48%; height: auto;" />
+  <img src="plots/shapley_xgb_spam.png" style="width: 48%; height: auto;" />
+</div>
+
+:::
+
+## Conclusion
+::: {.incremental}
+### 🔑 Key Insights
+- The UCI Spambase dataset is high-dimensional, sparse, and partially correlated.
+- Simple models like **lasso** and **linear SVM** performed surprisingly well just after normalization.
+- Feature importance helped us interpret what the models really learned.
+
+
+### 🏆 Challenges 
+- Handling **sparsity and overfitting** at high-dimensions.
+- Dealing with **almost compositional data**, that put ourselves in a non-Euclidean space.
+
+
+### 🚀 Future Directions
+- Use pre-trained neural networks! 
+- Either extract the word-embeddings from a BERT or a GPT and use those as new features for our classical ML classifiers.
+- Or directly put a classification head on a pre-trained NN and use that as a classifier.
+- Since the embeddings extraction is an unsupervised problem , we can be ready for newer spam techniques!
+:::
+
+
+## THANK YOU! 
+
+<style>
+.reveal h2 {
+  font-size: 4em;
+  text-align: center;
+  margin-top: 3rem;
+}
+</style>
+
